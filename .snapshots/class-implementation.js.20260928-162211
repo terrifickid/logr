@@ -1,0 +1,22 @@
+// fetch.js
+import { logr } from './logr.js';
+
+export const fetchWithFallback = logr.trajectory(
+  'fetchWithFallback',
+  { spec: 'features/fetch-with-fallback.feature' },
+  async (raw, log) => {
+    const input = logr.type({
+      url: "string.url",
+      retries: "number.integer >= 0 = 1",
+      mode: "'primary' | 'fallback'",
+    }).assert(raw);
+
+    const result = await log.run('fetch', () => doFetch(input));
+    const enriched = await log.run('enrich', () => enrich(result));
+
+    return logr.type({
+      data: "unknown",
+      source: "'primary' | 'fallback'",
+    }).assert(enriched);
+  }
+);

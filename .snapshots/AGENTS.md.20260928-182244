@@ -1,0 +1,620 @@
+# Logging instructions for this project
+
+This file tells you, the coding agent, how to log, and what your code must
+check while it runs. Read it before you write or change any code, and follow
+it in every file you touch. Everything you need is in this file.
+
+The test that decides whether logging is good enough: a person who has never
+seen the code must be able to read the records and retell the whole story of
+any single piece of work from them alone — what it was trying to do, what
+each step did, what data went in and came out, how it ended, and why, if it
+failed. If a record cannot be understood without opening the source, it has
+failed this test.
+
+## 1. Every piece of work gets an ID you can follow
+
+A piece of work is one request, one job, one run. The code calls it an
+**intent**.
+
+- When a piece of work starts, it gets an **ID**: a random string of 32
+  characters. Every record made during that work carries the ID. To read the
+  story of one piece of work, take the records that carry its ID and read
+  them in order.
+- Each step inside the work gets its own smaller ID: 16 characters, shared by
+  all the records that step produces.
+- Every record also carries a **number** counting its position in that piece
+  of work (the field is called `seq`). Timestamps can tie or jump; the number
+  cannot. When the numbers are in order, you are reading what happened in
+  order.
+- If a piece of work starts work of its own — a job that splits into per-item
+  jobs, a follow-up run — the new work gets its own ID, and it names the ID
+  of the work that started it. That is how a story continues across
+  boundaries.
+
+Everything is written as one JSON object per line, in one stream. Nothing is
+kept anywhere else.
+
+## 2. What every record carries
+
+A record is one line in the log — one JSON object. Every record carries:
+
+- when it happened, and how important it is (its **level**);
+- which piece of work it belongs to, which step made it, and its number in
+  that work's order (the IDs and number from section 1);
+- an **event name**: what kind of thing happened (section 3);
+- a **message**: one plain sentence saying what happened. The message is for
+  the person reading the line; the fields are for filtering and checking;
+- the **facts**: the data that moved (what went out, what came back), the
+  results, and the details of any check (section 7);
+- when something failed: how it failed, what happened because of it, and the
+  error's details (section 6).
+
+Two things are never true of a good record set: a record that belongs to no
+piece of work, and a step that does real work but leaves no records.
+
+## 3. Name each event from what the step is doing
+
+You choose the event name yourself, at the place in the code where it is
+written, from the purpose of that step — the thing it exists to do. Start
+from the top: what the system is for, what this operation is for, what parts
+the work has, what can happen to each part, and only then choose the name.
+
+Do not keep a fixed list of names to pick from. A fixed list forces every
+situation into labels that don't fit it, and a label that doesn't describe
+the actual situation tells the reader nothing.
+
+Shape every name the same way, so all names stay readable and predictable:
+
+- lowercase words joined by dots: `orders.fetch.started`;
+- the name describes the step, the same way everywhere it appears;
+- nothing that changes goes in the name — IDs, counts, and values live in
+  fields. If the name changes every time, records of the same kind can no
+  longer be found together;
+- the start and the end of a step say so: `.started`, `.succeeded`,
+  `.failed`;
+- mark the step itself in `domain:verb` form: `orders:fetch` — domain
+  `orders`, verb `fetch`.
+
+## 4. Choose the level by impact
+
+How important a record is depends on purpose — what the code was trying to
+do. A payment failing is a real problem; a statistics ping failing is nearly
+nothing; a user cancelling is no problem at all. Write each record so its
+situation is clear enough that only one reading is possible.
+
+Levels:
+
+- **fatal** — the program cannot continue (bad setup at startup,
+  unrecoverable state). The program must stop.
+- **error** — something unexpected happened; the work or the caller has to
+  deal with it.
+- **warn** — a problem that was expected and is being handled. Giving up
+  after retries goes here: one record when the retries are used up, never one
+  per attempt.
+- **debug** — not a problem: a cancelled request, work skipped on purpose.
+
+## 5. Start and finish every step
+
+- When a piece of work begins, write an entry record: what it wants, and the
+  inputs it starts with.
+- Before a real step (a call, a store write, a job), write that the step
+  started. After it, write exactly one ending: succeeded, with the result,
+  or failed, with the details. Never skip the success record — it is half the
+  story. Without it, a reader cannot tell finished from hung.
+- Write down the data that moved: what the step sent, what it received back,
+  what it produced. The real content — not a summary like "error occurred",
+  not a pointer like "see file X". The content is how the reader sees it
+  working, or sees the exact error.
+- If something happens inside a step that the reader needs to know — one item
+  of a batch failed, a retry happened — write an extra record from inside
+  that step.
+
+## 6. When something goes wrong — four cases
+
+1. **The code throws.** An error is raised and comes out of the step.
+2. **The answer says it failed.** The call itself worked — the connection
+   succeeded, a response arrived — but the content inside says it failed.
+   Example: a 200 OK whose body carries an error. The transport succeeding is
+   not the point; whether the purpose was achieved is. Write it as a failure,
+   with the error content from the body.
+3. **The data is wrong.** Nothing threw and nothing reported an error, but
+   the data is not what it must be: a field missing, a number where text was
+   expected, a value out of range. This is a failure too — the most dangerous
+   kind, because the code will carry on with bad data if it isn't caught.
+   Write it with what was expected and what was found (section 7).
+4. **Not every bad-looking thing is a failure.** A user cancelling, an
+   expected branch, "nothing yet, keep waiting" — these are normal. Write
+   them as normal records (debug or info), never as errors.
+
+When you write a failure, the record says: what the step was trying to do,
+what was expected, what was found, whether it was handled or stopped the
+work, and the error's details.
+
+Name the kind: `failureClass` is `thrown`, `returned`, or `shape` — one for
+each of the first three cases above. Say what happened because of it:
+`consequence` is `handled` (dealt with here), `escaped` (left the step for
+the caller), or `terminal` (the work stopped).
+
+Write the error's details out as plain fields — its name, message, where it
+was raised, its code, and anything else it carries. Never put the raw error
+object in a record.
+
+Log each failure once, where it happened. When it travels further up through
+the code, do not write it again at every level — re-writing the same failure
+makes a small problem look like an avalanche. And never catch an error and
+silently continue: log it and pass it on, or handle it and record that you
+did.
+
+## 7. Check the data — logging is only half the job
+
+Writing down what happened is not enough. The values your code handles must
+also be checked: where they enter (environment, configuration, dependencies —
+before any real work starts), where they move (before a request goes out,
+when a response comes back), and where they leave (before a result is
+returned or stored). A value that is wrong must be caught at the step that
+produced it, never carried on.
+
+When you check something, write four things into the record:
+
+- **expected** — what it should be;
+- **actual** — what it was;
+- **where** — which value, at which point;
+- **verdict** — "clean" or "violation".
+
+A check that comes back "violation" is a failure record, at error level, even
+though nothing threw and every request returned success.
+
+This changes what "succeeded" means: a step has succeeded only when it
+finished AND its result was checked. Write the success record after the check
+passes — not before, and not in place of it.
+
+Check the setup at startup too: environment, configuration, dependencies,
+present and valid. If the setup is wrong, the program cannot do its work —
+record it as fatal and stop.
+
+## 8. Secrets: shape, never values
+
+Never write the value of a secret into a record — not tokens, passwords,
+keys, cookies, or authorization headers. The value is exactly what must not
+be in the log.
+
+Instead, write the shape: that it is present, how long it is, what fields it
+has. `hasToken` (true), `tokenLength` (42), `dataKeys` (the field names). One
+field name, one meaning.
+
+Before logging any request headers, remove the authorization and cookie
+headers. If the removal fails, drop the data entirely and write a fixed line
+that says so, with no data in it.
+
+IDs, usernames, and resource names are fine to write.
+
+## 9. Stores, waiting, and crashes
+
+- **Stores (database, cache, file).** Write the key and the field names
+  involved, never the stored values. "Not found" is its own kind of error,
+  not an empty result. When the store fails, write the failure and pass it
+  on.
+- **Waiting (jobs, polling).** "Nothing yet, keep waiting" is normal — do not
+  write it as an error. When the job finally fails, that is a normal failure
+  record.
+- **Crashes.** Handle the two top-level events: an uncaught error, and a
+  rejected promise nobody handled. Write the full error details in the
+  record; give the outside world a short, safe message with no internals.
+  Before the program exits, flush the log — write out anything still waiting
+  — so the crash itself stays in the record.
+
+## 10. The shared module — create it once, import it everywhere
+
+Every project has one logging module. Create the file below once, exactly as
+given, saved as `logger.js` (install the logging library with `npm i pino`
+once). Every other file imports what it needs from this module. Never call
+the logging library directly anywhere else. Never use `console.log` or
+`console.error` at all.
+
+```js
+// logger.js — the shared logging module for this project.
+// One shared logger; use log.child(...) to attach fixed facts once.
+// Records carry the ID of the piece of work (traceId), the ID of the step
+// (spanId), and their position in the work (seq). Errors are written out
+// as plain fields with serializeError. Secrets are written as shape, never
+// as values. Values are checked with validate().
+
+import { randomBytes } from "node:crypto";
+import pino from "pino";
+
+// --- 1. The one shared logger ----------------------------------------------
+
+export function createLogger(options = {}) {
+  return pino({
+    level: process.env.LOG_LEVEL || "info",
+    messageKey: "message",
+    timestamp: pino.stdTimeFunctions.isoTime,
+    base: {
+      service: process.env.SERVICE_NAME || "app",
+      version: process.env.SERVICE_VERSION || "0.0.0",
+    },
+    formatters: { level: (label) => ({ severity: label.toUpperCase() }) },
+    ...options,
+  });
+}
+
+// The one shared instance. Import `log` everywhere; do not call pino() again.
+export const log = createLogger();
+
+// --- 2. Error serialization -------------------------------------------------
+
+// Every caught error goes through this before it is logged: it turns the
+// error into plain fields. Never log a raw Error object.
+export function serializeError(err, context = {}) {
+  if (err == null || typeof err !== "object") {
+    return { message: String(err), ...context };
+  }
+  const out = {
+    name: err.name,
+    message: err.message,
+    stack: err.stack,
+    ...context,
+  };
+  for (const k of ["code", "status", "statusText", "cause", "body"]) {
+    if (err[k] !== undefined) out[k] = err[k];
+  }
+  return out;
+}
+
+// --- 3. Redaction: shape, never values --------------------------------------
+
+// Write sizes and shapes, never values. Name each field after what it holds:
+// hasToken (true/false), tokenLength (a number), dataKeys (a list). One
+// field name, one meaning.
+export function presence(value) {
+  if (value == null || value === "") return false;
+  if (typeof value === "string" || Array.isArray(value)) return value.length;
+  if (typeof value === "object") return Object.keys(value).length;
+  return Boolean(value);
+}
+
+const SENSITIVE_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "set-cookie",
+  "proxy-authorization",
+]);
+
+// Remove auth material from headers before they are logged. If anything goes
+// wrong while removing, return no headers at all and let the caller drop the
+// data — never fall through with the raw headers.
+export function redactHeaders(headers = {}) {
+  try {
+    const kept = {};
+    const stripped = [];
+    for (const [k, v] of Object.entries(headers)) {
+      if (SENSITIVE_HEADERS.has(String(k).toLowerCase())) {
+        stripped.push(String(k).toLowerCase());
+        continue;
+      }
+      kept[k] = v;
+    }
+    return { kept, stripped };
+  } catch {
+    return { kept: null, stripped: null, redactionFailed: true };
+  }
+}
+
+// --- 4. Checking values -----------------------------------------------------
+//
+// validate(expected, actual, where) -> { verdict: "clean" }
+//                                   | { verdict: "violation", violations: [...] }
+//
+// The expected shape is written at the call site — it belongs to that call,
+// not to a central list. Shape language, per field:
+//   "string" | "number" | "boolean" | "object" | "array"   — a bare type
+//   { type, length?, min?, max?, oneOf?, of?, shape? }     — with detail
+//     length  exact length (strings, arrays)
+//     min/max numeric bounds
+//     oneOf   allowed values
+//     of      element spec for arrays
+//     shape   nested fields for objects
+export function validate(expected, actual, where = "value") {
+  const violations = [];
+  checkFields(expected, actual, where, "", violations);
+  return violations.length === 0
+    ? { verdict: "clean" }
+    : { verdict: "violation", violations };
+}
+
+function checkFields(expected, actual, where, path, violations) {
+  for (const [field, spec] of Object.entries(expected)) {
+    const value = actual == null ? undefined : actual[field];
+    const at = path ? `${path}.${field}` : field;
+    checkSpec(spec, value, where, at, violations);
+  }
+}
+
+function checkSpec(spec, value, where, at, violations) {
+  if (typeof spec === "string") {
+    if (typeOf(value) !== spec) pushViolation(violations, where, at, spec, value);
+    return;
+  }
+  if (spec.type && typeOf(value) !== spec.type) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+    return;
+  }
+  if (spec.length != null && (value == null || value.length !== spec.length)) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+  }
+  if (spec.min != null && !(typeof value === "number" && value >= spec.min)) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+  }
+  if (spec.max != null && !(typeof value === "number" && value <= spec.max)) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+  }
+  if (spec.oneOf && !spec.oneOf.includes(value)) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+  }
+  if (spec.of != null && Array.isArray(value)) {
+    value.forEach((item, i) => checkSpec(spec.of, item, where, `${at}[${i}]`, violations));
+  }
+  if (spec.shape && typeOf(value) === "object") {
+    checkFields(spec.shape, value, where, at, violations);
+  }
+}
+
+function pushViolation(violations, where, field, expected, value) {
+  violations.push({ where, field, expected, actual: describe(value) });
+}
+
+function describeExpected(spec) {
+  if (typeof spec === "string") return spec;
+  let d = spec.type || "value";
+  if (spec.length != null) d += `(${spec.length})`;
+  if (spec.min != null || spec.max != null) {
+    d += ` ${spec.min != null ? `>= ${spec.min}` : ""}${spec.min != null && spec.max != null ? ", " : ""}${spec.max != null ? `<= ${spec.max}` : ""}`;
+  }
+  if (spec.oneOf) d += ` one of ${JSON.stringify(spec.oneOf)}`;
+  return d;
+}
+
+function typeOf(v) {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
+}
+
+function describe(value) {
+  if (value === undefined) return "undefined";
+  if (value === null) return "null";
+  if (typeof value === "string") {
+    return `string(${value.length})${value.length <= 48 ? ` "${value}"` : ""}`;
+  }
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (typeof value === "object") return `object(${Object.keys(value).length} keys)`;
+  return `${typeof value} ${String(value)}`;
+}
+
+// --- 5. Pieces of work ------------------------------------------------------
+//
+// startIntent() opens one piece of work and returns handles for it:
+//   intent.started(inputs, message)      the entry record: what it wants
+//   intent.step({ step, event })         one real step of the work:
+//       .started() / .succeeded() / .failed()   the beginning and one ending
+//       .note(...)                              extra records inside the step
+//   intent.flow(level, event, fields, msg)      one-off records (a retry, a
+//                                               cancel) for the work itself
+//   intent.succeeded(fields, message)    the work finished, with its result
+//   intent.failed({ err, ... })          the work failed; pass `cause` to
+//                                        point at the record that caused it
+//
+// Work that starts its own work opens its own intent and passes the starter's
+// ID: startIntent({ ..., parentTraceId: parent.traceId })
+export function startIntent({ logger = log, subject, goal, parentTraceId } = {}) {
+  const traceId = randomBytes(16).toString("hex");
+  const rootSpanId = randomBytes(8).toString("hex");
+  const openedAt = Date.now();
+  const base = { traceId, ...(parentTraceId ? { parentTraceId } : {}) };
+  const intentLog = logger.child(base);
+  let seq = 0;
+  const emit = (level, fields, message) => {
+    seq += 1;
+    intentLog[level]({ ...fields, seq }, message);
+    return seq;
+  };
+
+  return {
+    traceId,
+
+    started(inputs = {}, message = goal || subject) {
+      return emit("info", { spanId: rootSpanId, event: `${subject}.started`, ...inputs }, message);
+    },
+
+    flow(level, event, fields = {}, message) {
+      return emit(level, { spanId: rootSpanId, event, ...fields }, message);
+    },
+
+    step({ step, event }) {
+      const spanId = randomBytes(8).toString("hex");
+      const t0 = Date.now();
+      return {
+        spanId,
+        note(level, eventName, fields = {}, message) {
+          return emit(level, { spanId, step, event: eventName, ...fields }, message);
+        },
+        started(fields = {}, message = `${step} started`) {
+          return emit("info", { spanId, step, event: `${event}.started`, ...fields }, message);
+        },
+        succeeded(fields = {}, message = `${step} succeeded`, { level = "info" } = {}) {
+          return emit(
+            level,
+            { spanId, step, event: `${event}.succeeded`, outcome: "success", durationMs: Date.now() - t0, ...fields },
+            message,
+          );
+        },
+        failed({ err, failureClass, consequence = "handled", fields = {}, message, level = "error" }) {
+          return emit(
+            level,
+            {
+              spanId,
+              step,
+              event: `${event}.failed`,
+              outcome: "failure",
+              failureClass,
+              consequence,
+              durationMs: Date.now() - t0,
+              err: serializeError(err),
+              ...fields,
+            },
+            message || `${step} failed`,
+          );
+        },
+      };
+    },
+
+    succeeded(fields = {}, message = `${subject} succeeded`, { level = "info" } = {}) {
+      return emit(
+        level,
+        { spanId: rootSpanId, event: `${subject}.succeeded`, outcome: "success", durationMs: Date.now() - openedAt, ...fields },
+        message,
+      );
+    },
+
+    failed({ err, failureClass = "thrown", consequence = "terminal", cause, fields = {}, message, level = "error" }) {
+      return emit(
+        level,
+        {
+          spanId: rootSpanId,
+          event: `${subject}.failed`,
+          outcome: "failure",
+          failureClass,
+          consequence,
+          ...(cause ? { cause } : {}),
+          durationMs: Date.now() - openedAt,
+          err: serializeError(err),
+          ...fields,
+        },
+        message || `${subject} failed`,
+      );
+    },
+  };
+}
+```
+
+How to use it:
+
+- In each file, make one logger that carries the file's fixed facts, once:
+  `const moduleLog = log.child({ component: "orders", function: "runImport" })`.
+  `log.child(...)` makes a copy of the shared logger with those facts
+  attached; every record it writes carries them, so they are never repeated
+  per call. (`component` is the module name, lowercase with dashes where
+  needed; `function` is the function's name.)
+- Open a piece of work with `startIntent`, record its steps with
+  `intent.step`, and close it with `intent.succeeded` or `intent.failed`.
+- The full pattern, one step from beginning to end:
+
+```js
+import { log, startIntent, presence, redactHeaders, validate } from "./logger.js";
+
+const moduleLog = log.child({ component: "orders", function: "runImport" });
+
+const intent = startIntent({ logger: moduleLog, subject: "orders.import", goal: `Import orders for ${date}` });
+intent.started({ source, date, apiKeyLength: presence(apiKey) });
+
+const step = intent.step({ step: "orders:fetch", event: "orders.fetch" });
+step.started({ request: { url, headers: redactHeaders(headers).kept } });
+try {
+  const body = await callSupplier();
+  const shape = validate(RESPONSE_SHAPE, body, "orders.fetch response");
+  if (shape.verdict === "violation") {
+    throw Object.assign(new Error("response shape violated"), { code: "BAD_RESPONSE_SHAPE" });
+  }
+  step.succeeded({
+    rows: body.orders.length,
+    response: body,                        // what came back, in full
+    expected: RESPONSE_SHAPE,              // the check, written out
+    actual: { rows: body.orders.length },
+    where: "orders.fetch response",
+    verdict: shape.verdict,
+  });
+} catch (err) {
+  const seq = step.failed({ err, failureClass: "thrown", consequence: "terminal" });
+  intent.failed({ err, failureClass: "thrown", consequence: "terminal",
+    cause: { traceId: intent.traceId, seq } });
+  return;
+}
+intent.succeeded({ imported: body.orders.length });
+```
+
+## 11. A worked example — one piece of work, read from its records
+
+An import of the day's orders: three came back, one failed the data check,
+two were saved, the work succeeded. In this example the repeated fields
+(service, version, component, function, time) are trimmed from the lower
+lines so you can see the story move; they are on every record in reality.
+
+```text
+{"severity":"INFO","time":"2026-09-25T20:50:49.350Z","service":"orders-importer","version":"1.2.0","component":"orders","function":"runImport","traceId":"4e8d2c9f7a3b1e5d6c0f8a4b2d9e7c31","spanId":"9c4e1d77b2a58f30","event":"orders.import.started","source":"supplier-gateway","date":"2026-09-25","apiKeyLength":8,"seq":1,"message":"Importing orders for 2026-09-25 from supplier-gateway"}
+{"severity":"INFO","time":"2026-09-25T20:50:49.351Z","service":"orders-importer","version":"1.2.0","component":"orders","function":"runImport","traceId":"4e8d2c9f7a3b1e5d6c0f8a4b2d9e7c31","spanId":"3f8a0c5d91e2b674","step":"orders:fetch","event":"orders.fetch.started","request":{"method":"GET","url":"https://api.supplier.example/v1/orders?date=2026-09-25","headers":{"accept":"application/json"},"strippedHeaders":["authorization"]},"seq":2,"message":"Fetching orders from supplier-gateway"}
+{"traceId":"4e8d2c9f7a3b1e5d6c0f8a4b2d9e7c31","spanId":"3f8a0c5d91e2b674","step":"orders:fetch","event":"orders.fetch.succeeded","outcome":"success","durationMs":12,"rows":3,"response":{"status":200,"orders":[{"id":"550e8400-e29b-41d4-a716-446655440000","total":129.5},{"id":12345,"total":40},{"id":"6ba7b810-9dad-11d1-80b4-00c04fd430c8","total":9.99}]},"expected":{"ok":"boolean","orders":"array"},"actual":{"ok":true,"orders":3},"where":"orders.fetch response","verdict":"clean","seq":3,"message":"Fetched 3 orders from supplier-gateway"}
+{"traceId":"4e8d2c9f7a3b1e5d6c0f8a4b2d9e7c31","spanId":"b7d2e94a10c6f385","step":"orders:verify","event":"orders.verify.started","items":3,"seq":4,"message":"Verifying 3 orders"}
+{"traceId":"4e8d2c9f7a3b1e5d6c0f8a4b2d9e7c31","spanId":"b7d2e94a10c6f385","step":"orders:verify","event":"orders.verify.quarantined","outcome":"failure","failureClass":"shape","consequence":"handled","orderIndex":1,"expected":"string(36)","actual":"number 12345","where":"orders[1].id","verdict":"violation","seq":5,"message":"Order 2 quarantined: id expected string(36), found number 12345"}
+{"traceId":"4e8d2c9f7a3b1e5d6c0f8a4b2d9e7c31","spanId":"b7d2e94a10c6f385","step":"orders:verify","event":"orders.verify.succeeded","outcome":"success","durationMs":3,"checked":3,"valid":2,"quarantined":1,"seq":6,"message":"Verified 3 orders (1 quarantined)"}
+{"traceId":"4e8d2c9f7a3b1e5d6c0f8a4b2d9e7c31","spanId":"5a1f8e63c47d920b","step":"orders:persist","event":"orders.persist.started","count":2,"keys":["id","total"],"seq":7,"message":"Persisting 2 orders"}
+{"traceId":"4e8d2c9f7a3b1e5d6c0f8a4b2d9e7c31","spanId":"5a1f8e63c47d920b","step":"orders:persist","event":"orders.persist.succeeded","outcome":"success","durationMs":18,"written":2,"expected":{"written":"number"},"actual":{"written":2},"where":"orders.persist result","verdict":"clean","seq":8,"message":"Persisted 2 orders"}
+{"traceId":"4e8d2c9f7a3b1e5d6c0f8a4b2d9e7c31","spanId":"9c4e1d77b2a58f30","event":"orders.import.succeeded","outcome":"success","durationMs":63,"imported":2,"quarantined":1,"seq":9,"message":"Import complete: 2 imported, 1 quarantined"}
+```
+
+Reading it cold: the import wanted the day's orders from the supplier, and it
+had a key. It fetched them, removed the auth header before writing the
+request down, and checked the response against its expected shape — clean. It
+checked each order: the second had a number where a 36-character string was
+required, so it was set aside as a failure, handled without stopping the
+work, and the step completed with its counts. It saved the two valid orders
+(the store records carry key names, never values) and checked the result of
+the save. It ended: 2 imported, 1 set aside, 63 milliseconds — the whole
+story in nine records, all carrying the same work ID, in order, with nothing
+that needs the source code to understand.
+
+## 12. Never do this
+
+- Never write to the console (`console.log`, `console.error`). Use the shared
+  logger.
+- Never create a second logger or call the logging library directly.
+- Never write a record without context.
+- Never put a raw error object in a record — write its details out first.
+- Never catch an error, log it, and continue as if nothing happened.
+- Never write a normal event (a cancel, an expected branch) as an error.
+- Never write a secret value into a record.
+- Never write a failure without saying what kind it was and what happened
+  because of it.
+- Never put changing values (IDs, counts) into event names.
+- Never write the same failure again at every level it travels through.
+- Never write a pointer ("saved to file X", "see record 12") instead of the
+  data itself.
+- Never skip the success record after a step that succeeded.
+- Never repeat fixed fields on every call — attach them once.
+- Never leave a step that can fail without a record, or a value that was
+  never checked.
+
+## 13. Before you call the work done
+
+1. All logging goes through the shared module. No console writes, no second
+   logger.
+2. Each file attaches its fixed facts once; each piece of work attaches its
+   ID once.
+3. Every piece of work opens with a record saying what it wants and its
+   inputs.
+4. Every step has a beginning record and exactly one ending; endings carry
+   the result; success records exist.
+5. Every record carries the work ID, the step ID, and its number.
+6. Every caught error is written out, logged where it happened, then passed
+   on or handled. Nothing is swallowed.
+7. Failures say how they failed and what happened because of them; a failure
+   that came from an earlier one points back at it.
+8. Every check is recorded with expected / actual / where / verdict; a
+   violated check is a failure record.
+9. No secret values appear anywhere; headers are cleaned before logging; if
+   cleaning fails, the data is dropped.
+10. Levels are chosen by impact: one warn when retries are used up, a cancel
+    as debug, a broken setup as fatal.
+11. Event names follow the shape rules; the same field carries the same
+    meaning everywhere.
+12. The test on the first page passes: read one piece of work's records cold,
+    and you can tell its whole story.

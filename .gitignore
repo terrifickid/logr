@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage / build output
+coverage/
+lib-cov/
+dist/
+build/
+*.tsbuildinfo
+
+# Env
+.env
+.env.*
+!.env.example
+
+# npm
+.npm/
+npm-shrinkwrap.json
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Cache
+.cache/
+.parcel-cache/
+.eslintcache
+.npm-cache/
+.node_repl_history

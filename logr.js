@@ -1,0 +1,86 @@
+// logr.js
+//
+// A trajectory wraps a function. One run of that function is one piece of
+// work: it gets a master id, writes a start record, runs its sublogic, and
+// writes a finish record when it returns or throws. The sublogic runs
+// through log.run(step, input, fn) — each step writes its own start and
+// finish records, and every record of the run carries the master id.
+//
+// Implementation example:
+//
+//   // fetch.js
+//   import { logr } from './logr.js';
+//
+//   export const fetchWithFallback = logr.trajectory(
+//     'fetchWithFallback',
+//     { spec: 'features/fetch-with-fallback.feature' },
+//     async (raw, log) => {
+//       const input = logr.type({
+//         url: "string.url",
+//         retries: "number.integer >= 0 = 1",
+//         mode: "'primary' | 'fallback'",
+//       }).assert(raw);
+//
+//       const result = await log.run('fetch', input, () => doFetch(input));
+//       const enriched = await log.run('enrich', result, () => enrich(result));
+//
+//       return logr.type({
+//         data: "unknown",
+//         source: "'primary' | 'fallback'",
+//       }).assert(enriched);
+//     }
+//   );
+//
+// Records go to pino, one JSON object per line. Nothing writes to console.
+
+import { type } from 'arktype';
+import pino from 'pino';
+
+export const pinoLog = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  timestamp: pino.stdTimeFunctions.isoTime,
+  serializers: { error: pino.stdSerializers.err },
+});
+
+export const logr = {
+  type,
+
+  trajectory(name, { spec }, fn) {
+    const wrapped = async (...args) => {
+      const id = crypto.randomUUID();
+      const bus = pinoLog.child({ id, name, spec });
+
+      const log = {
+        async run(step, input, fn) {
+          const subId = crypto.randomUUID();
+          const start = Date.now();
+          bus.info({ ts: Date.now(), subId, step, event: 'start' });
+          try {
+            const result = await fn();
+            bus.info({ ts: Date.now(), subId, step, event: 'success', durationMs: Date.now() - start, input, result });
+            return result;
+          } catch (error) {
+            bus.error({ ts: Date.now(), subId, step, event: 'failure', durationMs: Date.now() - start, input, error });
+            error.cause = { subId, step };
+            throw error;
+          }
+        },
+      };
+
+      const start = Date.now();
+      bus.info({ ts: Date.now(), event: 'start', input: args });
+
+      try {
+        const result = await fn(...args, log);
+        bus.info({ ts: Date.now(), event: 'success', durationMs: Date.now() - start, result });
+        return result;
+      } catch (error) {
+        const cause = error.cause ?? undefined;
+        bus.error({ ts: Date.now(), event: 'failure', durationMs: Date.now() - start, cause });
+        throw error;
+      }
+    };
+
+    return wrapped;
+  },
+};

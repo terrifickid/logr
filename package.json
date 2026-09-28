@@ -1,0 +1,18 @@
+{
+  "name": "logr",
+  "version": "1.0.0",
+  "description": "Trajectory logging: one run of a wrapped function is one piece of work with a master id, its steps writing their own records.",
+  "type": "module",
+  "main": "logr.js",
+  "exports": {
+    ".": "./logr.js"
+  },
+  "files": [
+    "logr.js",
+    "AGENTS.md"
+  ],
+  "dependencies": {
+    "arktype": "^2.2.5",
+    "pino": "^10.3.1"
+  }
+}

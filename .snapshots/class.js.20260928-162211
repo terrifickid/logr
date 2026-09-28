@@ -1,0 +1,58 @@
+// logr.js
+import { type } from 'arktype';
+import fc from 'fast-check';
+
+export const logr = {
+  type,
+
+  trajectory(name, { spec }, fn) {
+    const id = crypto.randomUUID();
+
+    const wrapped = async (...args) => {
+      const events = [];
+      const log = {
+        event(fields) {
+          events.push({ ts: Date.now(), ...fields });
+        },
+
+        async run(step, fn) {
+          log.event({ step, event: 'start' });
+          try {
+            const result = await fn();
+            log.event({ step, event: 'success' });
+            return result;
+          } catch (error) {
+            log.event({ step, event: 'failure', error: serializeError(error) });
+            throw error;
+          }
+        },
+      };
+
+      const start = Date.now();
+      log.event({ id, name, spec, event: 'start' });
+
+      try {
+        const result = await fn(...args, log);
+        log.event({ id, name, spec, event: 'success', durationMs: Date.now() - start });
+        console.log(events);
+        return result;
+      } catch (error) {
+        log.event({ id, name, spec, event: 'failure', durationMs: Date.now() - start });
+        console.error(events);
+        throw error;
+      }
+    };
+
+    if (process.env.FUZZ) {
+      fc.assert(
+        fc.asyncProperty(fc.anything(), async (input) => {
+          try { await wrapped(input); return true; }
+          catch (e) { return e instanceof ArkError; }
+        }),
+        { numRuns: 500 }
+      );
+    }
+
+    return wrapped;
+  },
+};

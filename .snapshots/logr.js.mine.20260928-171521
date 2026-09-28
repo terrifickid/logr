@@ -1,0 +1,350 @@
+// logr.js — one file. A trajectory wraps a function; its steps produce records.
+//
+// Usage:
+//
+//   import { logr } from './logr.js';
+//
+//   export const fetchWithFallback = logr.trajectory(
+//     'fetchWithFallback',
+//     { spec: 'features/fetch-with-fallback.feature' },
+//     async (raw, log) => {
+//       const input = logr.type({
+//         url: "string.url",
+//         retries: "number.integer >= 0 = 1",
+//         mode: "'primary' | 'fallback'",
+//       }).assert(raw);
+//
+//       const result = await log.run('fetch', input, () => doFetch(input));
+//       const enriched = await log.run('enrich', result, () => enrich(result));
+//
+//       return logr.type({
+//         data: "unknown",
+//         source: "'primary' | 'fallback'",
+//       }).assert(enriched);
+//     }
+//   );
+//
+// What the machinery carries, so call sites never have to:
+//   traceId   32 hex — the piece of work; every record of the run carries it
+//   spanId    16 hex — the step; every record of that step carries it
+//   seq       integer — position in the work, assigned on emit, never by hand
+//   event     derived from the step name: <name>.<step>.started / .succeeded / .failed
+//   outcome   success | failure on every ending record
+//   durationMs  on every ending record
+//   failure { class, consequence, error } serialized — never a raw Error
+//
+// Records go to the shared pino logger as one JSON object per line. Never
+// console. Secrets are never written; a check that fails is a failure record
+// even when nothing threw.
+
+import { randomBytes } from 'node:crypto';
+import { type } from 'arktype';
+import fc from 'fast-check';
+import pino from 'pino';
+
+// --- the logger ------------------------------------------------------------
+
+export const pinoLog = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  messageKey: 'message',
+  timestamp: pino.stdTimeFunctions.isoTime,
+  base: {
+    service: process.env.SERVICE_NAME || 'app',
+    version: process.env.SERVICE_VERSION || '0.0.0',
+  },
+  formatters: { level: (label) => ({ severity: label.toUpperCase() }) },
+});
+
+// --- error serialization ---------------------------------------------------
+
+// Every caught error passes through this before it is logged: plain fields,
+// never the error object.
+export function serializeError(err, context = {}) {
+  if (err == null || typeof err !== 'object') {
+    return { message: String(err), ...context };
+  }
+  const out = { name: err.name, message: err.message, stack: err.stack, ...context };
+  for (const k of ['code', 'status', 'statusText', 'cause', 'body']) {
+    if (err[k] !== undefined) out[k] = err[k];
+  }
+  return out;
+}
+
+// --- secrets: shape, never values ------------------------------------------
+
+// Write what a secret is, never what it holds: hasToken (true),
+// tokenLength (42), dataKeys (the field names).
+export function presence(value) {
+  if (value == null || value === '') return false;
+  if (typeof value === 'string' || Array.isArray(value)) return value.length;
+  if (typeof value === 'object') return Object.keys(value).length;
+  return Boolean(value);
+}
+
+const SENSITIVE_HEADERS = new Set([
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'proxy-authorization',
+]);
+
+// Remove auth material before headers are logged; fails closed — if the
+// removal cannot run, no headers are returned and the caller drops them.
+export function redactHeaders(headers = {}) {
+  try {
+    const kept = {};
+    const stripped = [];
+    for (const [k, v] of Object.entries(headers)) {
+      if (SENSITIVE_HEADERS.has(String(k).toLowerCase())) {
+        stripped.push(String(k).toLowerCase());
+        continue;
+      }
+      kept[k] = v;
+    }
+    return { kept, stripped };
+  } catch {
+    return { kept: null, stripped: null, redactionFailed: true };
+  }
+}
+
+// --- checking values -------------------------------------------------------
+
+// validate(expected, actual, where) -> { verdict: 'clean' }
+//                                  | { verdict: 'violation', violations: [...] }
+//
+// Shape language, per field:
+//   'string' | 'number' | 'boolean' | 'object' | 'array'    a bare type
+//   { type, length?, min?, max?, oneOf?, of?, shape? }      with detail
+export function validate(expected, actual, where = 'value') {
+  const violations = [];
+  checkFields(expected, actual, where, '', violations);
+  return violations.length === 0
+    ? { verdict: 'clean' }
+    : { verdict: 'violation', violations };
+}
+
+function checkFields(expected, actual, where, path, violations) {
+  for (const [field, spec] of Object.entries(expected)) {
+    const value = actual == null ? undefined : actual[field];
+    checkSpec(spec, value, where, path ? `${path}.${field}` : field, violations);
+  }
+}
+
+function checkSpec(spec, value, where, at, violations) {
+  if (typeof spec === 'string') {
+    if (typeOf(value) !== spec) pushViolation(violations, where, at, spec, value);
+    return;
+  }
+  if (spec.type && typeOf(value) !== spec.type) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+    return;
+  }
+  if (spec.length != null && (value == null || value.length !== spec.length)) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+  }
+  if (spec.min != null && !(typeof value === 'number' && value >= spec.min)) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+  }
+  if (spec.max != null && !(typeof value === 'number' && value <= spec.max)) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+  }
+  if (spec.oneOf && !spec.oneOf.includes(value)) {
+    pushViolation(violations, where, at, describeExpected(spec), value);
+  }
+  if (spec.of != null && Array.isArray(value)) {
+    value.forEach((item, i) => checkSpec(spec.of, item, where, `${at}[${i}]`, violations));
+  }
+  if (spec.shape && typeOf(value) === 'object') {
+    checkFields(spec.shape, value, where, at, violations);
+  }
+}
+
+function pushViolation(violations, where, field, expected, value) {
+  violations.push({ where, field, expected, actual: describe(value) });
+}
+
+function describeExpected(spec) {
+  if (typeof spec === 'string') return spec;
+  let d = spec.type || 'value';
+  if (spec.length != null) d += `(${spec.length})`;
+  if (spec.min != null || spec.max != null) {
+    d += ` ${spec.min != null ? `>= ${spec.min}` : ''}${spec.min != null && spec.max != null ? ', ' : ''}${spec.max != null ? `<= ${spec.max}` : ''}`;
+  }
+  if (spec.oneOf) d += ` one of ${JSON.stringify(spec.oneOf)}`;
+  return d;
+}
+
+function typeOf(v) {
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return 'array';
+  return typeof v;
+}
+
+function describe(value) {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value === 'string') {
+    return `string(${value.length})${value.length <= 48 ? ` "${value}"` : ''}`;
+  }
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (typeof value === 'object') return `object(${Object.keys(value).length} keys)`;
+  return `${typeof value} ${String(value)}`;
+}
+
+// --- a trajectory ----------------------------------------------------------
+
+function newTraceId() {
+  return randomBytes(16).toString('hex');
+}
+function newSpanId() {
+  return randomBytes(8).toString('hex');
+}
+
+export const logr = {
+  type,
+  log: pinoLog,
+
+  // trajectory(name, { spec }, fn) -> a function with the same arguments.
+  // `name` is the work's name; `spec` names the feature file stating its
+  // intent; `fn` receives the original arguments plus `log`.
+  trajectory(name, { spec }, fn) {
+    const wrapped = async (...args) => {
+      const traceId = newTraceId();
+      const rootSpanId = newSpanId();
+      const startedAt = Date.now();
+      const workLog = pinoLog.child({ traceId, trajectory: name, spec });
+      let seq = 0;
+
+      const emit = (level, fields, message) => {
+        seq += 1;
+        workLog[level]({ ...fields, seq }, message);
+      };
+
+      const log = {
+        // Every record the trajectory writes outside a step.
+        event(fields = {}) {
+          return emit('info', { spanId: rootSpanId, ...fields }, fields.message || name);
+        },
+
+        // A step: one started record, exactly one ending record.
+        async run(step, input, fn) {
+          const spanId = newSpanId();
+          const t0 = Date.now();
+          const event = `${name}.${step}`;
+          emit('info', { spanId, step, event: `${event}.started`, input }, `${step} started`);
+          try {
+            const result = await fn();
+            emit(
+              'info',
+              {
+                spanId,
+                step,
+                event: `${event}.succeeded`,
+                outcome: 'success',
+                durationMs: Date.now() - t0,
+                input,
+                result,
+              },
+              `${step} succeeded`,
+            );
+            return result;
+          } catch (error) {
+            emit(
+              'error',
+              {
+                spanId,
+                step,
+                event: `${event}.failed`,
+                outcome: 'failure',
+                durationMs: Date.now() - t0,
+                input,
+                failure: { class: 'thrown', consequence: 'escaped', error: serializeError(error) },
+              },
+              `${step} failed`,
+            );
+            throw error;
+          }
+        },
+
+        // A check: expected against actual. A violation is a failure record
+        // even though nothing threw. It is flow inside the work, not an
+        // ending of it, so it carries neither outcome nor durationMs.
+        check(where, expected, actual) {
+          const verdict = validate(expected, actual, where);
+          if (verdict.verdict !== 'clean') {
+            emit(
+              'error',
+              {
+                spanId: rootSpanId,
+                event: `${name}.check.violated`,
+                where,
+                expected,
+                actual,
+                failure: {
+                  class: 'shape',
+                  consequence: 'escaped',
+                  error: { name: 'ShapeViolation', message: `value violated its declared shape at ${where}` },
+                },
+              },
+              `${where} violated its declared shape`,
+            );
+          }
+          return verdict;
+        },
+      };
+
+      emit(
+        'info',
+        { spanId: rootSpanId, event: `${name}.started`, input: args },
+        `${name} started`,
+      );
+
+      try {
+        const result = await fn(...args, log);
+        emit(
+          'info',
+          {
+            spanId: rootSpanId,
+            event: `${name}.succeeded`,
+            outcome: 'success',
+            durationMs: Date.now() - startedAt,
+            result,
+          },
+          `${name} succeeded`,
+        );
+        return result;
+      } catch (error) {
+        emit(
+          'error',
+          {
+            spanId: rootSpanId,
+            event: `${name}.failed`,
+            outcome: 'failure',
+            durationMs: Date.now() - startedAt,
+            failure: { class: 'thrown', consequence: 'terminal', error: serializeError(error) },
+          },
+          `${name} failed`,
+        );
+        throw error;
+      }
+    };
+
+    if (process.env.FUZZ) {
+      fc.assert(
+        fc.asyncProperty(fc.anything(), async (input) => {
+          try {
+            await wrapped(input);
+            return true;
+          } catch (e) {
+            return e instanceof logr.type.errors.ArkError;
+          }
+        }),
+        { numRuns: 500 },
+      );
+    }
+
+    return wrapped;
+  },
+};
+
+export default logr;
