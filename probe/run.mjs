@@ -5,7 +5,6 @@ const enrich = async (r) => r;
 
 export const fetchWithFallback = logr.trajectory(
   'fetchWithFallback',
-  { spec: 'features/fetch-with-fallback.feature' },
   async (raw, log) => {
     const input = logr.type({
       url: 'string',
@@ -18,8 +17,6 @@ export const fetchWithFallback = logr.trajectory(
   },
 );
 
-console.log('--- ok run ---');
 console.log(JSON.stringify(await fetchWithFallback({ url: 'x', retries: 1, mode: 'primary' })));
-console.log('--- failing run ---');
 try { await fetchWithFallback({ url: 'boom', retries: 0, mode: 'fallback' }); }
-catch (e) { console.log('rethrown:', e.message); }
+catch (e) { console.error('rethrown:', e.message); }

@@ -13,7 +13,6 @@
 //
 //   export const fetchWithFallback = logr.trajectory(
 //     'fetchWithFallback',
-//     { spec: 'features/fetch-with-fallback.feature' },
 //     async (raw, log) => {
 //       const input = logr.type({
 //         url: "string.url",
@@ -45,10 +44,10 @@ export const pinoLog = pino({
 export const logr = {
   type,
 
-  trajectory(name, { spec }, fn) {
+  trajectory(name, fn) {
     const wrapped = async (...args) => {
       const id = crypto.randomUUID();
-      const bus = pinoLog.child({ id, name, spec });
+      const bus = pinoLog.child({ id, name });
 
       const log = {
         async run(step, input, fn) {

@@ -1,7 +1,7 @@
 // emit.mjs — one run, records to stdout.
 import { logr } from '../logr.js';
 
-const fn = logr.trajectory('probe', { spec: 'features/probe.feature' }, async (raw, log) => {
+const fn = logr.trajectory('probe', async (raw, log) => {
   const good = await log.run('good', raw, async () => ({ ok: true }));
   log.check('good result', { ok: 'boolean' }, good);
   log.check('bad result', { ok: 'string' }, good); // deliberate violation

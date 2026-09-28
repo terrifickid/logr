@@ -16,7 +16,6 @@ import { logr } from 'logr';
 
 export const fetchWithFallback = logr.trajectory(
   'fetchWithFallback',
-  { spec: 'features/fetch-with-fallback.feature' },
   async (raw, log) => {
     const input = logr.type({
       url: "string.url",
@@ -35,9 +34,8 @@ export const fetchWithFallback = logr.trajectory(
 );
 ```
 
-`logr.trajectory(name, { spec }, fn)` wraps a function. `name` is the work's
-name; `spec` names the file stating what the function is for; `fn` receives
-the original arguments plus `log`.
+`logr.trajectory(name, fn)` wraps a function. `name` is the work's name;
+`fn` receives the original arguments plus `log`.
 
 `log.run(step, input, fn)` is one step of the work: `step` is its name,
 `input` is what it is given, `fn` is the work it does. Call it once per step
